@@ -1,0 +1,4 @@
+# A fatal error has been detected
+#  SIGSEGV
+# Time: Mon Nov 17 2026
+Stack: j java.lang.StringUTF16.compress

@@ -1,0 +1,44 @@
+title: Java4Shell Exposure Hunt - Windows Java Without Mitigation Flag
+id: 4f22c0a1-6d33-4b3e-9f10-e1a2b3c4d505
+# Inventory/hunt aid: any java.exe launched from a typical vulnerable JDK install
+# path that does NOT carry one of the Java4Shell mitigation flags is an exposed
+# workload. Informational only — it does NOT prove exploitation.
+status: test
+description: Process creation of java.exe/javaw.exe with a vulnerable-JDK-looking command line but no -XX:-UseBASE64Intrinsics / DisableIntrinsic / UseAVX=2 / -Xint flag — candidates for Java4Shell patch/mitigation rollout.
+date: 2026/11/18
+modified: 2026/11/18
+references:
+  - https://calif.io/java4shell
+tags:
+  - cve.2026.114938
+  - attack.t1203
+author: IONSEC Detection Engineering
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_vulnerable_path:
+    CommandLine|contains:
+      - 'jdk'
+      - 'temurin'
+      - 'corretto'
+      - 'zulu'
+      - 'liberica'
+      - 'sapmachine'
+      - 'graalvm'
+      - 'openjdk'
+  selection_java_image:
+    Image|endswith:
+      - '\java.exe'
+      - '\javaw.exe'
+  filter_mitigated:
+    CommandLine|contains:
+      - '-XX:-UseBASE64Intrinsics'
+      - '-XX:DisableIntrinsic=_base64_decodeBlock'
+      - '-XX:UseAVX=2'
+      - '-Xint'
+  condition: selection_java_image and selection_vulnerable_path and not filter_mitigated
+falsepositives:
+  - Broad by design: any java.exe with a JDK-ish path lacking mitigation flags fires — this is an inventory signal, not an exploit indicator
+  - The keyword list can appear in app-specific javac/paths unrelated to a vulnerable runtime version; confirm actual JDK build via the hunt guides
+level: informational

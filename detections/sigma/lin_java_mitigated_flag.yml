@@ -1,0 +1,26 @@
+title: Java4Shell Telemetry - Linux Mitigation Flag Applied
+id: 4f22c0a1-6d33-4b3e-9f10-e1a2b3c4d506
+# Rollout verification: seeing the mitigation flags in java command lines tells
+# you the JVM launch was hardened for CVE-2026-114938. Pure telemetry.
+status: test
+description: Command lines containing -XX:-UseBASE64Intrinsics, -XX:DisableIntrinsic=_base64_decodeBlock or UseAVX=2 confirm a Java4Shell mitigation was applied to this JVM launch (label 'mitigation applied').
+date: 2026/11/18
+modified: 2026/11/18
+references:
+  - https://calif.io/java4shell
+tags:
+  - cve.2026.114938
+author: IONSEC Detection Engineering
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_flag:
+    CommandLine|contains:
+      - '-XX:-UseBASE64Intrinsics'
+      - '-XX:DisableIntrinsic=_base64_decodeBlock'
+      - '-XX:UseAVX=2'
+  condition: selection_flag
+falsepositives:
+  - None meaningful — flag presence is intended signal; gaps are the concern (missing telemetry here does not mean unmitigated, only unobserved)
+level: informational

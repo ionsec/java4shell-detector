@@ -1,0 +1,34 @@
+// Java4Shell (CVE-2026-114938) — Elastic EQL hunts
+// EQL sequence/regex: strong fit for java->shell and IAE burst hunts.
+// TLS caveat applies to any http.request.body hunt: the payload exists in
+// logs only where traffic arrived cleartext (terminating proxy / app logs).
+
+// (1) Sequence: java process -> child shell/interpreter within 60 seconds
+// (post-RCE indicator for Java4Shell heap corruption exploitation).
+sequence by host.name with maxspan=60s
+  [process where process.name in ("java","java.exe","javaw.exe","jshell")]
+  [process where process.parent.name in ("java","java.exe","javaw.exe") and
+            process.name in ("sh","bash","dash","zsh","python","python3","perl","nc","ncat","socat",
+                             "cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe",
+                             "certutil.exe","rundll32.exe","regsvr32.exe","curl","wget")]
+
+// (2) hs_err_pid JVM fatal-log creation (crash artifact of the trigger).
+file where file.name : "hs_err_pid*" and event.action in ("creation","file_create_event")
+
+// (3) HTTP request body regex: A{64}= (65 chars) or A{128}= — the raw trigger.
+// EQL supports =~ on a field; note only if the ingest pipeline exposes the raw body.
+http where http.request.body.content =~ ".*A{64}=.*" or http.request.method == "POST" and http.request.body.content =~ ".*A{128}=.*"
+
+// LIMITATION note: if your EQL build won't run the regex above (field only stored
+// as keyword without regexp support on your tier), match the fixed double-base64
+// constant instead — full literal, no regex needed:
+//   http where http.request.body.content : "*UNVQ...*"  -> see constant below
+// b64(b64encode('A'*64+'=')) =
+// UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ==
+http where http.request.body.content : "*UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ==*"
+
+// (4) IllegalArgumentException burst from one source IP (decoder rejects AFTER
+// corrupting memory; bursts are a live-exploit signature).
+sequence with maxspan=5m by user.name, source.ip
+  [http where http.response.status_code >= 400]
+  [log where message : "*IllegalArgumentException*" and message : "*Base64*"] | stats count > 20 within 5m by source.ip

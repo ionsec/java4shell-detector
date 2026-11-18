@@ -1,0 +1,6 @@
+dist/
+*.dSYM
+*.test
+.DS_Store
+/java4shell-detector
+/java4shell-detector.exe

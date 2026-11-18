@@ -1,0 +1,26 @@
+// Java4Shell (CVE-2026-114938) — Elastic KQL hunts
+// KQL has no regex-on-field, so match the literal 65/129-char trigger via
+// wildcards is impractical; use the double-base64 constants or pivot to
+// elastic.eql for regex. TLS caveat: web logs only contain the payload if the
+// hop arrived in cleartext or the app logs it.
+
+// (1) Application log: bursts of IllegalArgumentException from Base64 decode paths.
+// The decoder throws AFTER the 62-byte OOB write, so bursts = live triggering.
+event.dataset:"java.application" and message:"IllegalArgumentException" and message:"Base64"
+
+// (2) Crash artifact: hs_err_pid fatal logs (filebeat/auditbeat file module).
+file.name : "hs_err_pid*"
+
+// (3) JVM exits: SIGABRT-class termination (exit 134/139) of a java process —
+// correlate with (2). Works when process telemetry captures exit codes
+// (Elastic Endpoint / osquery).
+host.name:* and event.dataset:"endpoint.process" and process.name:(java or java.exe) and event.action:"process_ended" and process.exit_code:(134 or 139)
+
+// (4) Double-base64 trigger constant in request logs where the body/auth is logged.
+// Derivation: base64(b64encode('A'*64+'='))
+// = "UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ=="
+http.request.body.content:"UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ==" or http.request.header.authorization:"*UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ==*"
+
+// (5) Java spawning shell (KQL can't do parent/child sequencing on its own —
+// use elastic.eql file for the 60s sequence; this is a cheap single-hop filter).
+process.parent.name:"java" and process.name:(sh or bash or dash or python3 or python or perl or nc or ncat or socat)

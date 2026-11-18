@@ -1,0 +1,79 @@
+# =====================================================================
+# Java4Shell (CVE-2026-114938) — Suricata detection rules
+# SIDs 2510000-2519999 (chosen free range).
+# Trigger string : 64x'A' followed by '='  (65 chars) — "AAAA...A="
+#                  128x'A' + '=' variant on JDK 17-class runtimes.
+# TLS BLINDNESS  : these rules fire ONLY on cleartext HTTP. On TLS, traffic is
+#                  invisible at the wire; you only catch it where traffic is
+#                  decrypted/terminated (terminating proxy / LB re-inspection
+#                  tap). No rule here sees inside TLS.
+# DIRECTION NOTE : the verified pre-auth case is INBOUND — the attacker sends
+#                  the malformed Base64 to the vulnerable server (HTTP Basic,
+#                  form fields, JWT segments, uploads — independent
+#                  verification recorded JVM exit 134 + hs_err on Spring
+#                  Security/Tomcat from inbound Basic auth). Outbound
+#                  cleartext variants cover the rare client-side cleartext
+#                  case; outbound TLS is invisible to IDS by definition.
+# NEVER ACTIVELY TEST in production: replaying the 65- or 129-char trigger at a
+# real service destroys it on several stacks (Spring Security/Tomcat on
+# Temurin 17.0.21+9 kills the JVM pre-auth, exit 134 + hs_err log). Test only
+# in isolated lab VMs.
+# =====================================================================
+
+# INBOUND (primary): raw trigger in the Authorization header reaching the
+# vulnerable server — Basic/Bearer/JWT-segment decode paths. This is the
+# highest-value rule in the file.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"JAVASHELL CVE-2026-114938 INBOUND trigger A64 in HTTP Authorization header"; flow:established,to_server; http.header; content:"Authorization|3a|"; nocase; content:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; fast_pattern; pcre:"/^Authorization\x3a[^\r\n]*A{64}=/mi"; sid:2510000; rev:2; metadata:created_at 2026_11_18, updated_at 2026_11_18, cve CVE-2026-114938;)
+
+# INBOUND (JDK17-specific length threshold): same but 128x'A'.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"JAVASHELL CVE-2026-114938 INBOUND trigger A128 in HTTP Authorization header"; flow:established,to_server; http.header; content:"Authorization|3a|"; nocase; content:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; fast_pattern; pcre:"/^Authorization\x3a[^\r\n]*A{128}=/mi"; sid:2510001; rev:2; metadata:created_at 2026_11_18, updated_at 2026_11_18, cve CVE-2026-114938;)
+
+# OUTBOUND variants (rare cleartext client-side case): a compromised Java
+# client re-exfiltrating/re-using the trigger inside Basic auth leaving the
+# network. Kept separate so the inbound pair can be tuned independently.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"JAVASHELL CVE-2026-114938 OUTBOUND trigger A64/A128 in HTTP Authorization header"; flow:established,to_server; http.header; content:"Authorization|3a|"; nocase; content:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; fast_pattern; pcre:"/^Authorization\x3a[^\r\n]*A{64}=/mi"; sid:2510008; rev:2; metadata:created_at 2026_11_18, updated_at 2026_11_18, cve CVE-2026-114938;)
+
+# INBOUND: request body (POST payload). Trigger may sit anywhere in the body —
+# multipart, urlencoded param, JSON value, etc. Covers A64 and A128 with one
+# regex each; TLS blindness applies to the body too (only cleartext hops see it).
+alert http any any -> $HOME_NET any (msg:"JAVASHELL CVE-2026-114938 trigger A64/A128 in HTTP client body"; flow:established,to_server; http.request_body; content:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; fast_pattern; pcre:"/A{64}=/"; sid:2510002; rev:2; metadata:created_at 2026_11_18, updated_at 2026_11_18, cve CVE-2026-114938;)
+
+# INBOUND: request URI / query string (GET or POST url, url-encoded attacker payload).
+alert http any any -> $HOME_NET any (msg:"JAVASHELL CVE-2026-114938 trigger in HTTP URI"; flow:established,to_server; http.uri; content:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; fast_pattern; pcre:"/A{64}=/"; sid:2510003; rev:2; metadata:created_at 2026_11_18, updated_at 2026_11_18, cve CVE-2026-114938;)
+
+# Derived constant A: double-base64-encoded trigger.
+# Derivation (verified via python3):
+#   base64.b64encode(('A'*64+'=').encode())
+#   -> "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT0="
+#   base64.b64encode(<above>.encode())
+#   -> "UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ=="
+# This is the constant an attacker produces when re-encoding the whole trigger
+# (e.g. inside HTTP Basic credentials where 'user:trigger' is b64'd, or when
+# shipping the payload through another b64 layer). TLS blindness applies.
+alert http any any -> $HOME_NET any (msg:"JAVASHELL CVE-2026-114938 INBOUND trigger double-encoded (b64 of b64) in Authorization"; flow:established,to_server; http.header; content:"Authorization|3a|"; nocase; content:"UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ=="; sid:2510004; rev:2; metadata:created_at 2026_11_18, updated_at 2026_11_18, cve CVE-2026-114938;)
+
+# Derived constant A applied to the client request body (same derivation).
+# TLS blindness applies; also note that splitting/chunking the constant across
+# multiple TCP segments/packets evades single-packet content matching — this
+# rule fires only when the constant fits one inspection window.
+alert http any any -> $HOME_NET any (msg:"JAVASHELL CVE-2026-114938 trigger double-encoded (b64 of b64) in client body"; flow:established,to_server; http.request_body; content:"UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ=="; sid:2510005; rev:2; metadata:created_at 2026_11_18, updated_at 2026_11_18, cve CVE-2026-114938;)
+
+# Derived constant B: base64 of the raw trigger (single-encoded form, appears
+# when the trigger itself is shipped inside another base64-encoded field, e.g.
+# JWT parts or pre-encoded body params).
+# Derivation: base64.b64encode(('A'*64+'=').encode())
+#   -> QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT0=
+alert http any any -> $HOME_NET any (msg:"JAVASHELL CVE-2026-114938 INBOUND trigger single-encoded (b64 of A64=) in Authorization"; flow:established,to_server; http.header; content:"Authorization|3a|"; nocase; content:"QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT0="; sid:2510006; rev:2; metadata:created_at 2026_11_18, updated_at 2026_11_18, cve CVE-2026-114938;)
+
+# ---------------------------------------------------------------------
+# Slow-POST heap grooming is not expressed as a Suricata rule here: counting
+# many small paced POSTs per client needs thresholds tuned per site and is
+# done more reliably in the SIEM (see siem/ for the slow-POST queries).
+# ---------------------------------------------------------------------
+# VALIDATION: before deployment run:
+#   suricata -T -c /etc/suricata/suricata.yaml -S /path/to/this/rules
+# Rules use Suricata 6/7 sticky buffers (http.header, http.uri,
+# http.request_body); the Authorization header is matched inside http.header.
+# CI runs `suricata -T` on this file on every push. A{64}= also matches the 128-character variant, so the
+# body and URI rules need only one expression.
+# =====================================================================

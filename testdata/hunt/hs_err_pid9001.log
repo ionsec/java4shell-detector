@@ -1,0 +1,15 @@
+# A fatal error has been detected by the Java Runtime Environment:
+#
+#  SIGSEGV (0xb) at pc=0x00007f9c0f1a2d40
+#
+# JRE version: OpenJDK Runtime Environment Temurin-17.0.21+9 (17.0.21) (build 17.0.21+9)
+# Java VM: OpenJDK 64-Bit Server VM Temurin-17.0.21+9 (17.0.21+9, mixed mode, tiered, g1 gc, linux-amd64)
+# Command line: /opt/java/openjdk/bin/java -Xmx2g -jar /app/server.jar
+#
+# Problematic frame:
+# C  0x00007f9c0f1a2d40  [_base64_decodeBlock+0x7c]
+#
+# j  java.util.Base64$Decoder.decodeBlock([B[BI)V
+# j  java.util.Base64$Decoder.decode([BI[BI)V
+#
+# Time: Tue Nov 18 09:55:10 2026 IST

@@ -1,0 +1,20 @@
+#
+# A fatal error has been detected by the Java Runtime Environment:
+#
+#  SIGSEGV (0xb) at pc=0x00007f9c0f1a2d40
+#
+# JRE version: Java(TM) SE Runtime Environment (17.0.9+8) (build 17.0.9+8)
+# Java VM: OpenJDK 64-Bit Server VM (17.0.9+8-LTS, mixed mode, sharing, compressed oops, z gc, linux-amd64)
+# Problematic frame:
+# V  [jvm.dll+0x1a2d4]  _base64_decodeBlock+0x3c
+#
+# Time: Tue Nov 18 09:41:02 2026 IST
+---------------  T H R E A D  ---------------
+Current thread (0x00007f9be801d800):  JavaThread "http-nio-8080-exec-5"
+Current thread's detail:
+Stack: [0x0000700003d4b000,0x0000700003e4b000]
+j  java.util.Base64$Decoder.decodeBlock([B[BI)V
+j  java.util.Base64$Decoder.decode([BI[BI)V
+j  org.springframework.security.web.authentication.www.BasicAuthenticationFilter
+siginfo: si_signo: 11 (SIGSEGV), si_code: 1 (SEGV_MAPERR), si_addr: 0x0000000109b4ff60
+Registers:

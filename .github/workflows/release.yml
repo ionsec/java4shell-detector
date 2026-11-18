@@ -1,0 +1,53 @@
+name: release
+
+# Tag vX.Y.Z to build the binaries on a clean runner with the newest Go 1.27
+# patch release and attach them, with SHA256SUMS, to a DRAFT GitHub release.
+# Nothing is published until a maintainer reviews the draft and publishes it.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write               # create the draft release, nothing else
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.x"
+          check-latest: true
+          cache: false
+      - name: Gate (same checks as the security workflow)
+        run: |
+          scripts/leak-guard.sh HEAD
+          go vet ./...
+          go test -race -count=1 ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...  # v1.1.4 SSA builder panics on Go 1.27 syntax
+      - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          v="${TAG#v}"
+          mkdir dist
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os=${t%/*}; arch=${t#*/}; ext=""; [ "$os" = windows ] && ext=".exe"
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+              -o "dist/java4shell-detector-${v}-${os}-${arch}${ext}" .
+          done
+          (cd dist && sha256sum java4shell-detector-* > SHA256SUMS && cat SHA256SUMS)
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --draft --verify-tag --title "java4shell-detector $TAG" --generate-notes

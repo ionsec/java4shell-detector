@@ -1,0 +1,30 @@
+title: Java4Shell Crash Artifact - hs_err_pid Log File Created (Sysmon)
+id: 4f22c0a1-6d33-4b3e-9f10-e1a2b3c4d503
+# A JVM hit by the CVE-2026-114938 trigger often dies with SIGABRT (exit 134) and
+# writes an hs_err_pid*.log fatal-error log next to the app; Sysmon FileCreate is the
+# cleanest Windows signal. NOTE: Windows Security 5140 (share access) is NOT useful
+# here — keep this FileCreate-only.
+status: stable
+description: Creation of a JVM fatal-error log (hs_err_pid*.log) by Sysmon EventID 11 — crash signature consistent with the Java4Shell Base64 intrinsic OOB write; correlate the creating process PID with the serving java process.
+date: 2026/11/18
+modified: 2026/11/18
+references:
+  - https://calif.io/java4shell
+  - https://hadrian.io (independent verification on Temurin 17.0.21+9)
+tags:
+  - attack.execution
+  - attack.t1203
+  - cve.2026.114938
+author: IONSEC Detection Engineering
+logsource:
+  category: file_event
+  product: windows
+detection:
+  selection:
+    EventID: 11
+    TargetFilename|contains: '\hs_err_pid'
+    TargetFilename|endswith: '.log'
+  condition: selection
+falsepositives:
+  - Any severe JVM crash also writes hs_err logs (native OOM bugs, JIT compiler crashes) — not all are Java4Shell; check hs_err content for Base64/AVX frames
+level: high

@@ -1,0 +1,32 @@
+title: Java4Shell Crash Artifact - hs_err_pid Log Created on Linux (auditd FIM)
+id: 4f22c0a1-6d33-4b3e-9f10-e1a2b3c4d504
+# Linux JVMs hit by the CVE-2026-114938 trigger write hs_err_pid*.log into the
+# app or /tmp directory; auditd file watches (watches rules / FIM) are the host
+# sensor that sees the create. Correlate the PID with a running java process.
+status: stable
+description: Creation of hs_err_pid*.log under java application directories or /tmp via auditd file_event — fatal JVM crash consistent with the Java4Shell Base64 intrinsic overflow.
+date: 2026/11/18
+modified: 2026/11/18
+references:
+  - https://calif.io/java4shell
+tags:
+  - attack.execution
+  - attack.t1203
+  - cve.2026.114938
+author: IONSEC Detection Engineering
+logsource:
+  category: file_event
+  product: linux
+detection:
+  # auditd/auditbeat file watches must cover the JVM's working and /tmp dirs;
+  # adjust paths to your app layout, keep the hs_err naming pattern.
+  selection:
+    name|endswith: 'hs_err_pid*.log'
+  filter_legit_dirs:
+    name|startswith:
+      - '/var/log/'
+  condition: selection and not filter_legit_dirs
+falsepositives:
+  - Non-Java4Shell JVM crashes (GC crashes, native OOM, JIT aborts) also produce hs_err logs; triage on hs_err contents
+  - Requires auditd watches/FIM coverage on target dirs — without it the rule is silently blind
+level: high

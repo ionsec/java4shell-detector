@@ -1,0 +1,51 @@
+title: Java4Shell Post-Exploit - Linux Java Process Spawning Shell
+id: 4f22c0a1-6d33-4b3e-9f10-e1a2b3c4d501
+# Java4Shell (CVE-2026-114938) RCE lands inside the JVM; the first thing an
+# attacker does next is spawn a shell or interpreter from the java process.
+status: stable
+description: Java or shell process parented by java spawning sh/bash/dash, python, perl or nc/wget+sh pipes — post-RCE indicator for Java4Shell heap corruption exploitation.
+date: 2026/11/18
+modified: 2026/11/18
+references:
+  - https://calif.io/java4shell
+  - CVE-2026-114938
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - cve.2026.114938
+author: IONSEC Detection Engineering
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  # java, jshell or sh launched BY java are the parents; anything shell-like is the child.
+  selection_parent:
+    ParentImage|endswith:
+      - '/java'
+      - '/jshell'
+    ParentCommandLine|contains: 'java'
+  # sh/bash/dash and interpreters plus classic wget|sh / curl|sh pipe loaders.
+  selection_child_simple:
+    - Image|endswith:
+        - '/sh'
+        - '/bash'
+        - '/dash'
+        - '/python'
+        - '/python3'
+        - '/perl'
+        - '/nc'
+        - '/ncat'
+        - '/socat'
+  selection_child_pipe:
+    CommandLine|contains:
+      - 'wget'
+      - 'curl http'
+  selection_pipe_sh:
+    CommandLine|re: '(wget|curl)[^|]*\|\s*/?(bin/)?(ba|da|z|)sh'
+  condition: selection_parent and ( selection_child_simple or selection_pipe_sh )
+falsepositives:
+  # Java build tools (maven/gradle), CI runners and app servers legitimately fork shells.
+  - Build agents and CI pipelines running maven/gradle or shell steps from JVM processes
+  - Application-update hooks that launch helper scripts from java
+level: high

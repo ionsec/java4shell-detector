@@ -1,0 +1,109 @@
+# =====================================================================
+# Java4Shell (CVE-2026-114938) — Splunk hunts
+# Trigger: 64×'A' + '=' (65 chars), 128×'A' + '=' variant on JDK 17-class runtimes.
+# TLS caveat: these web-log hunts only work where the request arrived in
+# cleartext (terminating proxy/LB, app logging bodies/headers) — you cannot
+# see the payload inside TLS. DESTRUCTIVE: never replay trigger payloads at
+# production services; several stacks (Spring Security/Tomcat, Temurin
+# 17.0.21+9) die pre-auth with exit 134 + hs_err log.
+# Adjust index names (web:, wineventlog:, osquery/...) to your scheme.
+# =====================================================================
+
+# ---------------------------------------------------------------
+# (a) Trigger-string hunt in web access logs.
+#     Rex extracts the raw A{64}= / A{128}= forms from URI, POST body,
+#     or Authorization header. The body often only exists if a proxy or
+#     the app itself logs it.
+# ---------------------------------------------------------------
+index=web sourcetype=access_combined OR sourcetype=*:iis
+| eval huntfield=coalesce(uri_query, uri, cs_uri_query, cs_uri_stem) . " " . coalesce(c_textbody, form_body, "") . " " . coalesce(cs_authorization, "authorization=" . coalesce(cs_User_Agent,""))
+``` Keep the actual body/auth fields your proxy populates; many proxies only log URI.```
+| rex field=huntfield "(?<j4s_trig64>A{64}=)"
+| rex field=huntfield "(?<j4s_trig128>A{128}=)"
+| where isnotnull(j4s_trig64) OR isnotnull(j4s_trig128)
+| stats min(_time) as first_seen max(_time) as last_seen count by clientip, sourcetype, uri
+``` The decoder rejects AFTER corrupting, so a 401/400 status does not mean harmless.```
+``` | eval decode_status=coalesce(status, sc_status)```
+| sort - count
+
+# ---------------------------------------------------------------
+# (b) Double-base64 trigger constant.
+#     Derivation (verified with python3):
+#       t = base64.b64encode(('A'*64+'=').encode())   -> inner  constant
+#       c = base64.b64encode(t)                        -> double constant
+#     inner  = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT0="
+#     double = "UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ=="
+#     The inner constant is what appears when an attacker base64-encodes the
+#     trigger once more before sending (e.g. inside Basic credentials where the
+#     whole "user:pass" is b64-encoded, or double-encoded body params).
+# ---------------------------------------------------------------
+index=web sourcetype=access_combined OR sourcetype=*:iis
+| eval huntfield=coalesce(cs_authorization, "...") . " " . coalesce(uri, cs_uri_stem) . " " . coalesce(form_body, "")
+| search huntfield="*UVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVQwPQ==*"
+``` Also hunt the single-encoded constant (b64 of the trigger itself):```
+``` | search huntfield="*QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT0=*"
+| stats count by clientip, uri
+
+# ---------------------------------------------------------------
+# (c) hs_err_pid fatal-error log file creation (host FIM/osquery feed).
+#     JVM crash artifact = prime local Java4Shell signal; correlate the
+#     file's PID with a java process and check for exit 134.
+# ---------------------------------------------------------------
+index=osquery OR index=fim sourcetype=osquery OR sourcetype=*fim
+| regex filename="^hs_err_pid\d+\.log$"
+``` Windows Sysmon alternative (EventCode 11):
+| index=wineventlog EventCode=11 TargetFilename="*hs_err_pid*"
+```
+| table _time, host, filename, path, osquery_pid
+| correlate with: index=host sourcetype=process| where process exit code 134/139 for java```
+
+# ---------------------------------------------------------------
+# (d) Java spawning a shell process hunt.
+#     Windows: Sysmon EventCode 1 parent java.exe -> cmd/powershell/LOLBins.
+#     Linux: auditd/syslog (e.g. auditbeat) child sh/bash/python/perl/nc of java.
+# ---------------------------------------------------------------
+``` Windows variant:
+index=wineventlog EventCode=1
+| spath ParentImage | search ParentImage="*java*.exe"
+| spath Image | search Image IN ("cmd.exe","powershell.exe","wscript.exe","cscript.exe","certutil.exe","rundll32.exe","regsvr32.exe")
+| table _time host ParentImage Image CommandLine User
+```
+``` Linux variant:
+index=linux sourcetype=*auditd OR sourcetype=syslog
+| rename exe as image, ppid as parent
+| search "java" as parent context OR parent_process="*java*"
+| where image IN ("sh","bash","dash","python","python3","perl","nc","ncat","socat","curl","wget")
+| table _time host parent_process image cmdline uid
+```
+
+# ---------------------------------------------------------------
+# (e) IllegalArgumentException burst per client_ip.
+#     The decoder throws IAE AFTER the OOB write — a flood of these per
+#     client is live exploitation / trigger probing.
+# ---------------------------------------------------------------
+index=app sourcetype=*:application OR index=app sourcetype=java:log
+| regex _raw="(java\.lang\.)?IllegalArgumentException"
+| regex _raw="(?i)(base64|decoder|decode)"
+``` restrict to decode-path errors to cut noise from ordinary bad-input IAEs```
+| timechart span=5m count by client_ip
+``` alert when any client_ip exceeds N IAEs in a 5m window; tune N per app baseline```
+| where [ search index=app | timechart span=5m count by client_ip | eventstats max(count) as mx ]
+
+# ---------------------------------------------------------------
+# (f) Slow-POST groom hint.
+#     Calif's heap Feng Shui uses many small/paused POSTs from one client
+#     (request streaming / TCP-ACK pacing) to control allocation order.
+#     Hunt for low-byte POST bursts sustained over several minutes.
+# ---------------------------------------------------------------
+index=web sourcetype=access_combined OR sourcetype=*:iis
+| where http_method IN ("POST") OR cs_method="POST"
+``` keep only tiny bodies — grooming uses small partial writes```
+| where bytes < 2048
+| timechart span=5m count as post_count, avg(bytes) as avg_bytes by clientip
+``` look for: high post_count + avg_bytes very small, sustained 3+ consecutive        ```
+``` windows from the same clientip. Cross-reference IAE bursts (query e).          ```
+| stats count as posts sum(bytes) as total_bytes earliest(_time) as start latest(_time) as end by clientip
+| where posts > 100 AND total_bytes < 2048*posts/4
+| eval duration_min=(end-start)/60
+| where duration_min > 3
+``` these are the same client IPs doing slow-POST streaming — correlate with (a)/(e)```

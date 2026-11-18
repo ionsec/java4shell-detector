@@ -1,0 +1,102 @@
+name: security
+
+# Leak and vulnerability gate. Every job must pass before a change is merged
+# or released: protect `main` with these checks as required status checks.
+# No job uses secrets, and the token is read-only.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"   # weekly, so new advisories surface without a push
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  leaks:
+    name: leak guard and secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0              # full history: a secret removed in a later commit is still a leak
+          persist-credentials: false
+      - name: Leak guard (internal files, markers, commit metadata)
+        run: scripts/leak-guard.sh HEAD
+      - name: Install gitleaks (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+      - name: Secret scan, full history
+        run: '"$RUNNER_TEMP/gitleaks" git --no-banner --redact --verbose .'
+
+  go:
+    name: build, test, known vulnerabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.x"        # newest 1.27 patch, for standard-library security fixes
+          check-latest: true
+          cache: false
+      - name: Vendored dependencies match go.mod and go.sum
+        run: |
+          go mod verify
+          go mod vendor
+          git diff --exit-code -- go.mod go.sum vendor
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: Build all release targets
+        run: |
+          set -euo pipefail
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -trimpath -o /dev/null .
+          done
+      - name: govulncheck (dependencies and standard library)
+        # v1.10.0: v1.1.4 bundles an x/tools SSA builder that panics on Go 1.27
+        # composite-literal syntax ("unexpected expr: *ast.KeyValueExpr").
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+
+  rules:
+    name: detection content loads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Sigma and osquery files parse
+        run: |
+          python3 - <<'PY'
+          import glob, json, sys, yaml
+          bad = 0
+          for f in sorted(glob.glob("detections/sigma/*.yml")):
+              d = yaml.safe_load(open(f))
+              missing = [k for k in ("title", "id", "logsource", "detection", "level") if k not in d]
+              if missing:
+                  print(f"{f}: missing {missing}"); bad = 1
+          json.load(open("detections/osquery/osquery-java4shell.conf"))
+          sys.exit(bad)
+          PY
+      - name: Suricata accepts the rule file
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq suricata
+          sudo suricata -T -c /etc/suricata/suricata.yaml -S detections/ids/suricata.rules -l "$RUNNER_TEMP"

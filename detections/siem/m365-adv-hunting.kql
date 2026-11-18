@@ -1,0 +1,63 @@
+// Java4Shell (CVE-2026-114938) — Microsoft 365 Defender Advanced Hunting (AHK)
+// Same intent as Sentinel, different schema/device tables.
+// Trigger: 64×'A'+'=' (65 chars); 128×'A'+'=' on JDK17. TLS caveat applies to
+// any network-body hunt: only cleartext hops see the payload.
+
+// ---------------------------------------------------------------------------
+// (1) Java spawning shell/LOLBin within process tree (post-RCE indicator)
+DeviceProcessEvents
+| where InitiatingProcessFileName in~ ("java.exe","javaw.exe")
+| where FileName in~ ("cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe",
+                      "certutil.exe","rundll32.exe","regsvr32.exe","python.exe","perl.exe","nc.exe")
+| project Timestamp, DeviceName, FileName, ProcessCommandLine,
+          InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+
+// ---------------------------------------------------------------------------
+// (2) hs_err_pid*.log file creation — JVM fatal crash artifact
+DeviceFileEvents
+| where FileName startswith "hs_err_pid" and FileName endswith ".log"
+| where ActionType == "FileCreated"
+| project Timestamp, DeviceName, FileName, FolderPath, InitiatingProcessFileName,
+          InitiatingProcessId, ReportId
+
+// ---------------------------------------------------------------------------
+// (3) Java process termination shortly after (exit 134/139, SIGABRT/SEGV class):
+//     correlates with (2) as the trigger-crash signature. MDE surfaces exit codes
+//     via additional-activities or DeviceProcessEvents extended column if enabled:
+DeviceProcessEvents
+| where FileName in~ ("java.exe","javaw.exe")
+| extend ec = toint(parse_json(AdditionalFields).ExitCode)
+| where ec in (134,139)
+| project Timestamp, DeviceName, FileName, ec, InitiatingProcessId
+
+// ---------------------------------------------------------------------------
+// (4) Slow-POST groom hint on device network events (many small outbound POSTs
+// from one client_ip in short windows) — request streaming used for heap grooming
+DeviceNetworkEvents
+| where ActionType == "ConnectionSuccess"
+| where InitiatingProcessFileName in~ ("java.exe","javaw.exe")  -- or leave for the client-side vector
+| summarize cnt=count(), bytes=sum(RemotePort) by bin(Timestamp, 5m), LocalIP, RemoteIP
+| where cnt > 100
+| project Timestamp, LocalIP, RemoteIP, cnt
+// correlate this egress pattern with inbound IAE bursts on the target app
+
+// ---------------------------------------------------------------------------
+// (5) Outbound TLS connections from java service identities to unusual hosts —
+// samczsun client-side vector (no exposed service needed; the JVM is victim)
+DeviceNetworkEvents
+| where InitiatingProcessFileName in~ ("java.exe","javaw.exe")
+| where RemotePort in (443, 8443)
+| where not(RemoteIP in ( // add your known CDN / DB / artifact hosts here
+        ""))
+| where RemoteIP !startswith "10." and RemoteIP !startswith "192.168." and RemoteIP !startswith "172.16."
+| summarize conns=count(), first_conn=min(Timestamp), last_conn=max(Timestamp) by DeviceName, RemoteIP, RemotePort
+| where conns > 5  -- repeated egress beyond known-good egress list is the lead
+
+// ---------------------------------------------------------------------------
+// (6) Web-server hunt variant for Windows server: IIS access log ingestion
+// (W3CIISLog in Sentinel, AppServiceHTTPLogs/Event in AHK Log Analytics table
+// via AppPlatformLogsforSpring etc.). Only the URI/referrer fields are usually
+// logged — full Authorization/body hunt needs terminating-proxy logs.
+AppPlatformLogsforSpring
+| where LogMessage matches regex @"A{64}=" or LogMessage matches regex @"A{128}="
+| summarize count() by AppName, bin(TimeGenerated, 5m)

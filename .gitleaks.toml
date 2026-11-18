@@ -1,0 +1,8 @@
+title = "java4shell-detector"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Vendored upstream code and test fixtures"
+paths = ['''^vendor/''', '''^testdata/''']

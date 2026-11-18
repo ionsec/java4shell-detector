@@ -1,0 +1,65 @@
+// Java4Shell (CVE-2026-114938) — Microsoft Sentinel hunts
+// Trigger: 64×'A' + '=' (65 chars), 128×'A' + '=' variant on JDK17.
+// TLS caveat: W3CIISLog / access logs only show the body/header if the hop
+// arrived cleartext (terminating proxy/LB) or the app logs it — you cannot
+// see inside TLS.
+
+// ---------------------------------------------------------------------------
+// (1) DeviceProcessEvents: java spawning shells/interpreters (post-RCE sign)
+DeviceProcessEvents
+| where InitiatingProcessFileName in~ ("java.exe","javaw.exe")
+| where FileName in~ ("cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe",
+                      "certutil.exe","rundll32.exe","regsvr32.exe","nc.exe","python.exe","perl.exe")
+| project Timestamp, DeviceName, InitiatingProcessFileName, FileName, ProcessCommandLine,
+          InitiatingProcessCommandLine, AccountName, ReportId
+// triage: compare against host baseline; vendor updaters also shell from java
+
+// ---------------------------------------------------------------------------
+// (2) DeviceFileEvents: hs_err_pid*.log creation — JVM fatal crash artifact of
+// the CVE-2026-114938 trigger (also matches non-J4S JVM crashes: check hs_err
+// content for Base64/AVX frames)
+DeviceFileEvents
+| where FileName startswith "hs_err_pid" and FileName endswith ".log"
+| where ActionType in ("FileCreated","FileCreatedUsn")
+| project Timestamp, DeviceName, FileName, FolderPath, InitiatingProcessFileName,
+          InitiatingProcessId, ReportId
+
+// ---------------------------------------------------------------------------
+// (3) W3CIISLog regex hunt for raw trigger string in URI / Authorization /
+// body when the proxy logs it. Sentinel KQL has matches regex on string col.
+W3CIISLog
+| where isnotempty(csMethod)
+| extend huntfield = strcat(coalesce(csUriQuery, ""), " ", coalesce(csUriStem, ""),
+                            " ", coalesce(csReferer, ""))
+| where huntfield matches regex @"A{64}=" or huntfield matches regex @"A{128}="
+| project TimeGenerated, cIP, csMethod, csUriStem, scStatus, csHost, Hunt=huntfield
+// NOTE: W3CIISLog does not normally carry Authorization or POST body; only the
+// URL/ref fields above are reliably present, so surface is partial.
+
+// ---------------------------------------------------------------------------
+// (4) Same hunt on app access logs (ingested as AppServiceHTTPLogs / custom
+// access logs) where Authorization headers got logged — partial surface same as above
+AzureDiagnostics
+| where Category == "AppServiceHTTPLogs"
+| where any_of(cs_authorization_s, body_s) matches regex @"A{64}[=]"  -- dialect note: use parse_ or custom column
+| summarize count() by ClientIP_s, TimeGenerated, bin(TimeGenerated, 5m)
+
+// ---------------------------------------------------------------------------
+// (5) IllegalArgumentException bursts per client IP in app logs (decoder rejects
+// AFTER the OOB write — bursts = live triggering)
+union isfuzzy=true AppServiceConsoleLogs, custom_app_logs_CL
+| where RawData matches regex @"(?i)IllegalArgumentException"
+| where RawData matches regex @"(?i)(base64|decode)"
+| summarize iae_count=count() by bin(TimeGenerated, 5m), ClientIP_s, AppName_s
+| where iae_count > 20   -- tune threshold to app baseline
+
+// ---------------------------------------------------------------------------
+// (6) Device-based java process exit code 134/139 (SIGABRT/SEGV) — matches the
+// trigger-crash signature (exit 134 + hs_err log verified on Temurin 17.0.21+9)
+DeviceProcessEvents
+| where FileName in~ ("java.exe","javaw.exe") and FileName endswith ".exe"
+| where ProcessVersionInfoCompanyName has_any ("Oracle","Adoptium","Amazon","Azul","BellSoft","SAP","Microsoft","Red Hat")
+| where Timestamp > ago(1d)
+// correlate with (2): same ReportId / device, exit code surfaced via DeviceRegistry/other table —
+// if your MDE tier exposes ProcessExitCode use it:
+//   | extend exitcode = toint(ProcessExitCode) | where exitcode in (134,139)
